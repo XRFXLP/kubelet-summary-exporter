@@ -23,6 +23,7 @@ func ConfigureTLS(logger *zap.Logger, certAuthorityFile string, insecure bool, n
 	if err != nil {
 		return err
 	}
+
 	certs := x509.NewCertPool()
 	if !certs.AppendCertsFromPEM(cadata) {
 		return fmt.Errorf("failed to append certs from pem")
@@ -30,8 +31,10 @@ func ConfigureTLS(logger *zap.Logger, certAuthorityFile string, insecure bool, n
 
 	newTlsConfig := &tls.Config{}
 	newTlsConfig.RootCAs = certs
+
 	if insecure {
 		logger.Warn("using insecure tls")
+
 		newTlsConfig.InsecureSkipVerify = insecure
 	}
 
@@ -46,6 +49,7 @@ func ConfigureTLS(logger *zap.Logger, certAuthorityFile string, insecure bool, n
 	defaultTransport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		return dialer.DialContext(ctx, network, fmt.Sprintf("%s:10250", nodeHost))
 	}
+
 	return nil
 }
 
@@ -55,6 +59,7 @@ func ServerAddrFromCluster(nodeHost string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	clientset, err := kubernetes.NewForConfig(kubeConfig)
 	if err != nil {
 		return "", err
@@ -70,5 +75,6 @@ func ServerAddrFromCluster(nodeHost string) (string, error) {
 			return addr.Address, nil
 		}
 	}
+
 	return "", fmt.Errorf("no node matching %q found", nodeHost)
 }
