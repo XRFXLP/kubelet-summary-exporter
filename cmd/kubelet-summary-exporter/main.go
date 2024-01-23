@@ -48,6 +48,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+
 	logger = logger.With(zap.String("app", "kubelet-stats-exporter"))
 
 	if err := utils.ConfigureTLS(logger, cli.CA, cli.Insecure, cli.NodeHost); err != nil {
@@ -57,7 +58,9 @@ func main() {
 	if _, err := os.Stat(cli.TokenPath); os.IsNotExist(err) {
 		logger.Error("token not found", zap.String("file", cli.TokenPath), zap.Error(err))
 	}
+
 	serverAddr := cli.NodeHost
+
 	if cli.LookUpHostname {
 		//Handle downward API using a node name that isn't identical to the node's Hostname
 		name, err := utils.ServerAddrFromCluster(cli.NodeHost)
@@ -68,9 +71,11 @@ func main() {
 			logger.Info("using updated serverAddr for certificate validation", zap.String("hostname", serverAddr), zap.String("original", cli.NodeHost))
 		}
 	}
+
 	scraper := scraper.NewScraper(logger, serverAddr, cli.TokenPath, cli.Timeout)
 
 	promRegistry := prometheus.NewRegistry()
+
 	err = promRegistry.Register(scraper)
 	if err != nil {
 		logger.Fatal("failed to register storage metric")

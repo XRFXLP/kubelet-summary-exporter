@@ -15,6 +15,9 @@ import (
 	"go.uber.org/zap"
 )
 
+var capacityBytes uint64 = 107361579008
+var usedBytes uint64 = 0
+
 func TestDecodingJson(t *testing.T) {
 	for _, tc := range []struct {
 		Name        string
@@ -31,9 +34,14 @@ func TestDecodingJson(t *testing.T) {
 							Name      string "json:\"name\""
 							Namespace string "json:\"namespace\""
 						}{Name: "aws-xray-daemon-bpmqx", Namespace: "kube-system"},
-						EphemeralStorage: &Volume{
-							UsedBytes:      36864,
-							AvailableBytes: 92321636352,
+						Containers: []ContainerStats{
+							{
+								Name: "aws-xray-daemon",
+								Rootfs: FsStats{
+									CapacityBytes: &capacityBytes,
+									UsedBytes:     &usedBytes,
+								},
+							},
 						},
 					},
 				},
@@ -49,9 +57,14 @@ func TestDecodingJson(t *testing.T) {
 							Name      string "json:\"name\""
 							Namespace string "json:\"namespace\""
 						}{Name: "appcache-us-east-1f-6599bdfbcd-lf9j6", Namespace: "rmux"},
-						EphemeralStorage: &Volume{
-							UsedBytes:      20480,
-							AvailableBytes: 92463894528,
+						Containers: []ContainerStats{
+							{
+								Name: "rmux",
+								Rootfs: FsStats{
+									CapacityBytes: &capacityBytes,
+									UsedBytes:     &usedBytes,
+								},
+							},
 						},
 					},
 				},
@@ -63,11 +76,14 @@ func TestDecodingJson(t *testing.T) {
 			if err != nil {
 				t.Fatalf("failed to read test data %+v", err)
 			}
+
 			scraper := NewScraper(zap.L(), "", "", 1*time.Microsecond)
+
 			summary, err := scraper.parse(ex)
 			if err != nil {
 				t.Fatalf("failed to parse test data %+v", err)
 			}
+
 			if diff := cmp.Diff(tc.WantSummary, summary); diff != "" {
 				t.Errorf("summary mismatch (-want +got):\n%s", diff)
 			}

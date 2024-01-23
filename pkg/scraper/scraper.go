@@ -20,13 +20,13 @@ import (
 )
 
 type Scraper struct {
-	tokenPath string
-	timeout   time.Duration
-	targetIP  string
-	storage   *prometheus.Desc
-	errors    *prometheus.Desc
-	errCnt    float64
-	logger    *zap.Logger
+	tokenPath      string
+	timeout        time.Duration
+	targetIP       string
+	usedBytes      *prometheus.Desc
+	availableBytes *prometheus.Desc
+	errCnt         float64
+	logger         *zap.Logger
 }
 
 func NewScraper(logger *zap.Logger, targetIP string, tokenPath string, timeout time.Duration) *Scraper {
@@ -35,22 +35,22 @@ func NewScraper(logger *zap.Logger, targetIP string, tokenPath string, timeout t
 		timeout:   timeout,
 		targetIP:  targetIP,
 		logger:    logger.With(zap.String("component", "scraper")),
-		storage: prometheus.NewDesc(
-			prometheus.BuildFQName("kube_pod", "", "ephemeral_storage_used_bytes"),
-			"Ephemeral storage used in bytes",
-			[]string{"node", "namespace", "pod"},
+		usedBytes: prometheus.NewDesc(
+			prometheus.BuildFQName("container_fs", "", "usage_bytes"),
+			"Disk used in bytes",
+			[]string{"node", "namespace", "pod", "container"},
 			nil),
-		errors: prometheus.NewDesc(
-			prometheus.BuildFQName("kubelet_summary_exporter", "", "errors"),
-			"Errors scraping kubelet stats summary",
-			[]string{"type"},
+		availableBytes: prometheus.NewDesc(
+			prometheus.BuildFQName("container_fs", "", "limit_bytes"),
+			"Capacity of container disk",
+			[]string{"node", "namespace", "pod", "container"},
 			nil),
 	}
 }
 
 func (s *Scraper) Describe(ch chan<- *prometheus.Desc) {
-	ch <- s.storage
-	ch <- s.errors
+	ch <- s.usedBytes
+	ch <- s.availableBytes
 }
 
 func (s *Scraper) Collect(ch chan<- prometheus.Metric) {
@@ -66,58 +66,31 @@ func (s *Scraper) Collect(ch chan<- prometheus.Metric) {
 	}
 
 	req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", token))
+
 	client := &http.Client{
 		Timeout: s.timeout,
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		s.errCnt++
-		ch <- prometheus.MustNewConstMetric(
-			s.errors,
-			prometheus.CounterValue,
-			s.errCnt,
-			"request error",
-		)
 		s.logger.Warn("failed to make request to stats/summary", zap.Error(err))
 		return
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		s.errCnt++
-		ch <- prometheus.MustNewConstMetric(
-			s.errors,
-			prometheus.CounterValue,
-			s.errCnt,
-			"status error",
-		)
 		s.logger.Warn("got unexpected status for stats/summary", zap.String("status", resp.Status))
 		return
 	}
 
 	defer resp.Body.Close()
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		s.errCnt++
-		ch <- prometheus.MustNewConstMetric(
-			s.errors,
-			prometheus.CounterValue,
-			s.errCnt,
-			"read body error",
-		)
-		s.logger.Error("failed to read body", zap.Error(err))
 		return
 	}
 
 	summary, err := s.parse(body)
 	if err != nil {
-		ch <- prometheus.MustNewConstMetric(
-			s.errors,
-			prometheus.CounterValue,
-			s.errCnt,
-			"parse body error",
-		)
-		s.logger.Error("failed to parse body", zap.Error(err))
 		return
 	}
 
@@ -125,13 +98,21 @@ func (s *Scraper) Collect(ch chan<- prometheus.Metric) {
 		if pod == nil {
 			continue
 		}
-		if pod.EphemeralStorage != nil {
-			usedBytes := pod.EphemeralStorage.UsedBytes
+
+		for _, container := range pod.Containers {
+			capacityBytes := *container.Rootfs.CapacityBytes
+			usedBytes := *container.Rootfs.UsedBytes
 			ch <- prometheus.MustNewConstMetric(
-				s.storage,
+				s.usedBytes,
 				prometheus.GaugeValue,
 				float64(usedBytes),
-				summary.Node.NodeName, pod.PodRef.Namespace, pod.PodRef.Name, // node, namespace, pod
+				summary.Node.NodeName, pod.PodRef.Namespace, pod.PodRef.Name, container.Name,
+			)
+			ch <- prometheus.MustNewConstMetric(
+				s.availableBytes,
+				prometheus.GaugeValue,
+				float64(capacityBytes),
+				summary.Node.NodeName, pod.PodRef.Namespace, pod.PodRef.Name, container.Name,
 			)
 		}
 	}
@@ -139,10 +120,12 @@ func (s *Scraper) Collect(ch chan<- prometheus.Metric) {
 
 func (s *Scraper) parse(body []byte) (*Summary, error) {
 	var summary Summary
+
 	err := json.Unmarshal(body, &summary)
 	if err != nil {
 		return nil, err
 	}
+
 	return &summary, nil
 }
 
@@ -160,42 +143,58 @@ type Node struct {
 // Pod represents pod spec in the summary endpoint
 type Pod struct {
 	/*
-		EXAMPLE:
-		"podRef": {
-		     "name": "configs-service-59c9c7586b-5jchj",
-		     "namespace": "onprem",
-		     "uid": "5fbb63da-d0a3-4493-8d27-6576b63119f5"
-		    }
+		 EXAMPLE:
+		 "podRef": {
+			  "name": "configs-service-59c9c7586b-5jchj",
+			  "namespace": "onprem",
+			  "uid": "5fbb63da-d0a3-4493-8d27-6576b63119f5"
+			 }
 	*/
 	PodRef struct {
 		Name      string `json:"name"`
 		Namespace string `json:"namespace"`
 	} `json:"podRef"`
-	/*
-		  Don't parse the list of volumes
-			EXAMPLE:
-			"volume": [
-			     {...},
-			     {...}
-			    ]
-	*/
-	//Volumes    []*Volume `json:"volume"`
-	EphemeralStorage *Volume `json:"ephemeral-storage"`
+	// Stats of containers in the measured pod.
+	// +patchMergeKey=name
+	// +patchStrategy=merge
+	Containers []ContainerStats `json:"containers" patchStrategy:"merge" patchMergeKey:"name"`
+}
+
+// ContainerStats holds container-level unprocessed sample stats.
+type ContainerStats struct {
+	// Reference to the measured container.
+	Name string `json:"name"`
+	// Stats pertaining to container rootfs usage of filesystem resources.
+	// Rootfs.UsedBytes is the number of bytes used for the container write layer.
+	// +optional
+	Rootfs FsStats `json:"rootfs,omitempty"`
+}
+
+// FsStats contains data about filesystem usage.
+type FsStats struct {
+	// CapacityBytes represents the total capacity (bytes) of the filesystems underlying storage.
+	// +optional
+	CapacityBytes *uint64 `json:"capacityBytes,omitempty"`
+	// UsedBytes represents the bytes used for a specific task on the filesystem.
+	// This may differ from the total bytes used on the filesystem and may not equal CapacityBytes - AvailableBytes.
+	// e.g. For ContainerStats.Rootfs this is the bytes used by the container rootfs on the filesystem.
+	// +optional
+	UsedBytes *uint64 `json:"usedBytes,omitempty"`
 }
 
 // Volume represents the volume struct
 /*
-EXAMPLE:
-{
-"time": "2019-11-25T20:33:19Z",
-"availableBytes": 25674719232,
-"capacityBytes": 25674731520,
-"usedBytes": 12288,
-"inodesFree": 6268236,
-"inodes": 6268245,
-"inodesUsed": 9,
-"name": "vault-client"
-}
+ EXAMPLE:
+ {
+ "time": "2019-11-25T20:33:19Z",
+ "availableBytes": 25674719232,
+ "capacityBytes": 25674731520,
+ "usedBytes": 12288,
+ "inodesFree": 6268236,
+ "inodes": 6268245,
+ "inodesUsed": 9,
+ "name": "vault-client"
+ }
 */
 // https://github.com/kubernetes/kubernetes/blob/v1.18.5/pkg/volume/volume.go
 // https://github.com/kubernetes/kubernetes/blob/v1.18.5/pkg/volume/csi/csi_client.go#L553
@@ -233,12 +232,12 @@ type Volume struct {
 	// on the underlying storage, and is shared with host processes and other volumes
 	//InodesFree uint64 `json:"inodesFree"`
 	/*
-		Name   string `json:"name"`
+		 Name   string `json:"name"`
 
-		PvcRef struct {
-			PvcName      string `json:"name"`
-			PvcNamespace string `json:"namespace"`
-		} `json:"pvcRef"`
+		 PvcRef struct {
+			 PvcName      string `json:"name"`
+			 PvcNamespace string `json:"namespace"`
+		 } `json:"pvcRef"`
 	*/
 }
 
@@ -247,5 +246,6 @@ func (p *Pod) MarshalLogObject(oe zapcore.ObjectEncoder) error {
 		oe.AddString("name", p.PodRef.Name)
 		oe.AddString("namespace", p.PodRef.Name)
 	}
+
 	return nil
 }
