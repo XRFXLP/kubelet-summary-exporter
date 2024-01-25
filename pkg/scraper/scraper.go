@@ -7,6 +7,7 @@
 package scraper
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -64,11 +65,15 @@ func (s *Scraper) Collect(ch chan<- prometheus.Metric) {
 	if err != nil {
 		s.logger.Fatal("unable to load specified token", zap.String("file", s.tokenPath), zap.Error(err))
 	}
-
 	req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", token))
 
 	client := &http.Client{
 		Timeout: s.timeout,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true,
+			},
+		},
 	}
 
 	resp, err := client.Do(req)
